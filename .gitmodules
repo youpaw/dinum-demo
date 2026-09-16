@@ -1,0 +1,4 @@
+[submodule "bureautix-example"]
+	path = bureautix-example
+	url = https://github.com/youpaw/bureautix-example.git
+	branch = vm-support

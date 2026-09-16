@@ -1,115 +1,130 @@
-# Docs quickstart — isolated Nix VM on loopback
+# Selfhostix collaboration demo
 
-Runs the existing nixpkgs packages (`lasuite-docs` backend, `lasuite-docs-frontend`,
-`lasuite-docs-collaboration-server`) as a full stack in an ephemeral QEMU VM.
-No Docker, no repo pollution. Same config is reused for the libvirt testing VM.
+Selfhostix server as a Nix microVM (cloud-hypervisor) + N Bureautix client
+VMs on libvirt, one pre-seeded shared document for live co-editing.
+
+Runs the nixpkgs packages (`lasuite-docs` backend, `lasuite-docs-frontend`,
+`lasuite-docs-collaboration-server`) as a full stack. No Docker.
 
 ## Layout
 
 | File | Purpose |
 |---|---|
-| `flake.nix` | `nixosConfigurations.quickstart` (ephemeral) + `testing` (libvirt) |
-| `docs-vm.nix` | Shared system: `services.lasuite-docs` + dex (mock OIDC) + garage (S3) + local postgres/redis + nginx. Adapted from `nixos/tests/web-apps/lasuite-docs.nix` |
-| `testing-vm.nix` | Testing-VM delta (hostname, key-only SSH) |
-| `run.sh` | Boot script (uses the NixOS runner, direct kernel boot) |
-| `vm-loader` | Built `system.build.vmWithBootLoader` output (self-contained qcow2 backing image) |
-| `vm-disk.qcow2` | Writable overlay (all VM state; delete for a fresh start) |
+| `demo.sh` | VM lifecycle + thin dispatcher (microvm/boot clients/status/stop/logs/clean; delegates state to `propagate.sh`) |
+| `propagate.sh` | Single propagation flow: `users` (init/upsert/list/check/set-password/delete) → `seed` (shared doc + share) → `provision` (clients); owns SSH key generation/installation |
+| `flake.nix` → `selfhostix` | Server config: `docs-vm.nix` + `microvm/docs-guest.nix` |
+| `docs-vm.nix` | Base system: `services.lasuite-docs` + dex (mock OIDC) + garage (S3) + local postgres/redis + nginx |
+| `docs-net.nix` | Guest network overlay: static tap IP, OIDC issuer, `DJANGO_CSRF_TRUSTED_ORIGINS`, `DJANGO_ALLOWED_HOSTS` (guest IP + LAN host), nginx aliases |
+| `microvm/docs-guest.nix` | MicroVM guest: tap `192.168.100.10`, `/var/lib` volume (drive `.11` / grist `.12` reserved) |
+| `host/net-setup.sh` | Host tap + NAT setup (`tap-selfhostix` `192.168.100.1/24`, `sudo` once per boot) |
+| `host/Caddyfile` | Host reverse proxy on the single LAN `:80`: path routing (`/drive/*` → `.11`, `/grist/*` → `.12`, all else → docs `.10`) |
+| `host/caddy.service` | Host systemd unit for the proxy — edit paths, then install |
+| `host/detect-origin.sh` | Prints the host LAN origin browsers use (feeds Django origins + seed links) |
 
 ## Start
 
 ```bash
-nix --extra-experimental-features 'nix-command flakes' \
-  build .#nixosConfigurations.quickstart.config.system.build.vmWithBootLoader -o vm-loader
-./run.sh        # -nographic console; Ctrl-a x to quit (kills the VM)
+sudo ./host/net-setup.sh      # tap-selfhostix 192.168.100.1 (once per boot)
+./demo.sh microvm run         # boot selfhostix (foreground)
+./demo.sh users upsert        # create users from data/users.env (0600)
+./demo.sh seed                # shared doc (requires users first)
+./demo.sh clients [N]         # boot + provision N Bureautix clients (default 2)
+./demo.sh provision [N]       # provision already-booted clients (no reboot)
+./demo.sh all                 # users + seed + clients (server must run already)
+./demo.sh status              # server + client health
+./demo.sh stop                # shut down client VMs (keep disks)
+./demo.sh clean               # delete overlays + seed state (keeps users.env + SSH key)
 ```
 
-First boot takes ~3–5 min (postgres init, django migrate, garage layout+bucket).
-Wait for `http://docs.local:8081/` → 200 (add `127.0.0.1 docs.local` to `/etc/hosts`
-for browser use, or `curl --resolve docs.local:8081:127.0.0.1 …`).
+`./demo.sh users|seed|provision` are thin pass-throughs to `./propagate.sh`,
+which also runs standalone (`./propagate.sh all`). Emails in `data/users.env`
+need a dotted domain — Django rejects single-label domains (`user@host`).
 
-## Loopback endpoints (host → guest)
+First boot takes a while (image build, postgres init, django migrate,
+garage layout+bucket). Runtime state (volumes, overlays, SSH key, seed info)
+lives in `data/` (gitignored); the client image builds to `client-loader/`
+(gitignored symlink).
 
-| URL | Guest service |
-|---|---|
-| `http://docs.local:8081/` | nginx: frontend + `/api` + `/collaboration` |
-| `http://127.0.0.1:8082/dex/…` | dex mock OIDC (browser side) |
-| `http://127.0.0.1:8083/` | garage S3 API |
-| `ssh -p 2221 root@127.0.0.1` | guest shell (password `root`) |
+Env knobs: `NUM_CLIENTS=2`, `MICROVM_IP=192.168.100.10`,
+`SELFHOSTIX_SSH_TARGET=...` (users/seed/logs SSH target, default `MICROVM_IP`),
+`SELFHOSTIX_IP=...` (IP clients use for docs.selfhostix, default: guest IP),
+`SELFHOSTIX_PUBLIC_ORIGIN=http://<host-LAN-IP>` (browser origin trusted by Django;
+auto-detected at boot, override only if detection picks the wrong uplink),
+`ALICE_PASS`/`BOB_PASS`, `SEED_DOC_TITLE`, `SELFHOSTIX_URL` (seed link base,
+defaults to the detected origin), `CLIENT_SSH_BASE=2221` (client i on
+`localhost:2220+i`), `HEADLESS=1` (clients without GUI), `DATA_DIR`.
 
-Login: dex mock user `admin` / `password`. Full login+create-doc flow was verified
-with curl (authenticate → dex mock → callback → `POST /api/v1.0/documents/`).
+Access: no client setup needed — any browser opening the **host LAN IP**
+lands on Selfhostix via the proxy (`/` → docs; `/drive/*`, `/grist/*` are
+reserved for the next services on the same address). Log in at `/admin/` with
+a Selfhostix user
+(password login, no SSO roundtrip: the mock OIDC issuer lives on the tap
+net and is unreachable from outside).
+Client guests boot straight from the nix runner (`nix-build -A vm` output):
+first boot installs the system into `data/selfhostix-cN-disk.qcow2` from the
+host store, so allow several minutes. Each client opens its own QEMU window
+and forwards guest `:22` to `localhost:222N` for provisioning
+(`ssh -p 2221 root@localhost`, password `nixos` until the demo key lands).
+Password SSH during provisioning uses `nixpkgs#sshpass` (no host install
+needed); a persistent ed25519 key is generated at `data/demo-ssh/`.
+Client OS login stays `alice/test`, `root/nixos` (stock bureautix-example
+image); Selfhostix logins are `alice@docs.selfhostix` / `bob@docs.selfhostix`
+(passwords in `data/users.env`, defaults `alice-demo` / `bob-demo` —
+demo-only).
 
-Note: OIDC redirect URLs point at `http://127.0.0.1:8080/dex/…` (guest-local);
-from the host rewrite the port to `8082`, keeping all query params.
+Walkthrough: start the server, run `all`, use both QEMU windows
+— each browser lands on the seed doc; type on both sides to
+show live cursors via `/collaboration`.
 
-## Testing without SSO (password login)
+## Login without SSO (password login)
 
-The backend keeps `ModelBackend` enabled alongside OIDC, and the frontend's
-only auth gate is `GET /api/v1.0/users/me/` with the session cookie — so a
-Django-admin session works for the whole app, no IdP roundtrip. Verified:
+The backend keeps `ModelBackend` enabled alongside OIDC, so a Django-admin
+session works for the whole app, no IdP roundtrip. Either manage a user via
+`./demo.sh users set-password <email>`, or in the guest:
 
 ```bash
-# 1. in the guest: create a superuser with password
-ssh -p 2221 root@127.0.0.1
-lasuite-docs-manage createsuperuser --email tester@docs.local --password <secret>
+ssh root@192.168.100.10
 lasuite-docs-manage shell <<'EOF'
 from django.contrib.auth import get_user_model
-u = get_user_model().objects.get(admin_email='tester@docs.local')
-# OIDC normally fills these; the user serializer 500s without an email
-u.email = 'tester@docs.local'
+u = get_user_model().objects.get(admin_email='tester@docs.selfhostix')
+u.email = 'tester@docs.selfhostix'  # OIDC normally fills these; the serializer 500s without
 u.full_name = 'Test User'
 u.short_name = 'Test'
-u.language = 'en-us'
+u.set_password('<secret>')
 u.save()
 EOF
 ```
 
-```text
-2. in the browser: log in at http://docs.local:8081/admin/ (email + password)
-3. open http://docs.local:8081/ — you are logged in, SSO never involved
-```
+Then log in at `<host-IP>/admin/` (email + password) and open `<host-IP>/`
+— SSO never involved.
 
-API-only equivalent: POST the credentials to `/admin/login/` (with CSRF token),
-then call the API with the `sessionid`/`csrftoken` cookies. Backend pytest suites
-do the same via `client.force_login(user)` (`src/backend/core/tests/`).
+> **CSRF in browsers:** Django ≥5.2 validates the `Origin` header on every
+> unsafe request. Trusted origins are `http://docs.selfhostix`, the guest IP, plus
+> the auto-detected host LAN origin (`SELFHOSTIX_PUBLIC_ORIGIN` — see
+> `docs-net.nix` and `host/detect-origin.sh`). If the host IP changes,
+> reboot the microVM so the new origin is picked up. After a rebuild, reset
+> the password via `./demo.sh users set-password` (or wipe `data/` for a
+> fresh start).
+>
+> **Allowed hosts:** `DJANGO_ALLOWED_HOSTS` (also in `docs-net.nix`) must list
+> every `Host` header browsers send — domain, guest IP, LAN host. Without
+> them Django answers `400 DisallowedHost` on `/api` and `/admin` while `/`
+> still loads (nginx serves the frontend statically, so a working homepage
+> with broken login is the signature symptom).
 
-> **CSRF in browsers (fixed in config):** Django ≥5.2 validates the `Origin`
-> header on *every* unsafe request — browsers always send it, bare `curl`
-> doesn't, which is why scripted flows worked while browsers got
-> `CSRF verification failed`. A bare `DJANGO_CSRF_TRUSTED_ORIGINS="http://*"`
-> never matches; the config now lists explicit origins
-> (`http://docs.local:8081`, `localhost`, `127.0.0.1`). If password login
-> fails after a rebuild from an old disk, reset it:
-> `lasuite-docs-manage shell` → `u.set_password(...)` (or use a fresh
-> `vm-disk.qcow2`).
+## Gotchas
 
-## Fresh start / after config changes
-
-Direct boot pins `init=<toplevel>` from the **disk's** store, so a rebuilt image
-needs a fresh overlay:
-
-```bash
-rm -f vm-disk.qcow2 && ./run.sh
-```
-
-## Testing VM (libvirt, later)
-
-Same `docs-vm.nix` + `testing-vm.nix`: build
-`.#nixosConfigurations.testing.config.system.build.vmWithBootLoader`,
-import the backing `nixos.qcow2` into virt-manager/virsh (virtio disk+net,
-4G RAM), or deploy with `nixos-anywhere --flake .#testing`.
-Set your SSH key in `testing-vm.nix` first.
-
-## Gotchas found while building this
-
-- The NixOS `run-*-vm` runner shares `/nix/store` via virtiofsd, which fails
-  rootless here → the image sets `sharedDirectories = mkForce {}` and
-  `directBoot.enable = true` in `vmVariantWithBootLoader`, making the qcow2
-  fully standalone.
-- `build.vm` reads `virtualisation.vmVariant`, `build.vmWithBootLoader` reads
-  `virtualisation.vmVariantWithBootLoader` **only** — set both.
-- QEMU SLIRP forwards arrive on the guest eth0 address, so dex/garage must bind
-  `0.0.0.0` (not `127.0.0.1`) and the guest firewall must open 8080/9000.
-  Still loopback-only from the host's perspective.
-- `qemu-system-x86_64` from nixpkgs (`qemu-host-cpu-only`) works with
-  `-machine q35,accel=kvm:tcg`; system qemu works too for manual boots.
+- Virtio NICs get unpredictable interface names, so the guest static IP is
+  matched on MAC address (see `docs-net.nix`).
+- Services reached from outside the guest (dex, garage S3) must bind
+  `0.0.0.0` (not `127.0.0.1`) with the guest firewall opened accordingly.
+- The microVM root filesystem is ephemeral (erofs + `/var/lib` volume only):
+  the demo SSH key installed on the guest is lost on every reboot.
+  `propagate.sh` reinstalls it automatically (password fallback via
+  `nixpkgs#sshpass`); `demo.sh` does the same for clients.
+- Only `/var/lib` persists on the guest (postgres, garage, media). Users and
+  the seed doc live in postgres — they survive reboots, but a fresh
+  `var-lib.img` means re-running `./demo.sh users upsert` + `./demo.sh seed`.
+- Enterprise/venue WiFi often isolates clients (no machine-to-machine
+  traffic): if `curl http://<host-LAN-IP>/` works on the host but a second
+  machine's browser hangs, check AP client isolation before blaming the proxy.

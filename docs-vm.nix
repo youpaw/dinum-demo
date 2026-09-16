@@ -1,8 +1,10 @@
-# Shared Docs VM module — adapted from nixos/tests/web-apps/lasuite-docs.nix
+# Docs service system module — LaSuite Docs stack, adapted from
+# nixos/tests/web-apps/lasuite-docs.nix
 # Runs entirely on loopback: nginx :80, dex :8080, garage S3 :9000.
+# Consumed by the microVM guest (see ./microvm/docs-guest.nix).
 { config, pkgs, lib, ... }:
 let
-  domain = "docs.local";
+  domain = "docs.selfhostix";
   oidcAddr = "127.0.0.1:8080";
   s3Addr = "127.0.0.1:9000";
   garageAccessKey = "GKaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -11,30 +13,17 @@ in
 {
   system.stateVersion = "25.11";
   time.timeZone = "UTC";
-  networking.hostName = lib.mkDefault "docs-quickstart";
+  networking.hostName = lib.mkDefault "selfhostix";
   networking.hosts."127.0.0.1" = [ domain ];
 
-  # We boot the baked qcow2 standalone (direct qemu / libvirt import),
-  # NOT via the NixOS runner's virtiofs host-store shares.
-  # qemu-vm.nix options only exist inside the VM variant, hence the
-  # vmVariant paths below. mkForce is required: qemu-vm.nix *merges*
-  # xchg/shared entries into sharedDirectories, plain {} would not delete them.
-  virtualisation.vmVariant.virtualisation.sharedDirectories = lib.mkForce { };
-  virtualisation.vmVariantWithBootLoader.virtualisation.sharedDirectories = lib.mkForce { };
-  # Boot the bootloader image via direct kernel boot in the runner too
-  # (same method as boot.sh): avoids GRUB-on-serial blindness and lets the
-  # runner pass the correct init=/regInfo= cmdline for the variant closure.
-  virtualisation.vmVariantWithBootLoader.virtualisation.directBoot.enable = true;
-
-  # Easy console access for an ephemeral VM (do NOT reuse for real testing VM
-  # without changing — see testing-vm.nix).
+  # Easy console access for the demo VM (root/root, SSH open).
   users.users.root.password = "root";
   services.getty.autologinUser = lib.mkDefault "root";
   services.openssh.enable = true;
   services.openssh.settings.PermitRootLogin = "yes";
-  # 80/443 nginx; 8080 dex and 9000 garage-S3 are only reachable from the
-  # host via QEMU SLIRP forwards (guest eth0), so the firewall must allow
-  # them even though nothing listens on 0.0.0.0:80-style public sockets.
+  # 80/443 nginx; 8080 dex and 9000 garage-S3 are reached via the guest
+  # tap NIC address, so the firewall must allow them even though nothing
+  # listens on public sockets.
   networking.firewall.allowedTCPPorts = [ 80 443 8080 9000 ];
 
   environment.systemPackages = with pkgs; [ curl jq garage_2 ];
@@ -74,7 +63,8 @@ in
       # Django ≥5.2 checks Origin on ALL unsafe requests (browsers always send
       # it, curl doesn't — which is why curl worked and browsers 403'd).
       # Must be explicit origins with port; a bare "http://*" never matches.
-      DJANGO_CSRF_TRUSTED_ORIGINS = "http://docs.local:8081,http://localhost:8081,http://127.0.0.1:8081";
+      # NOTE: overridden by docs-net.nix (mkForce) with the tap + LAN origins;
+      # this base value is loopback-only.
     };
   };
 
@@ -83,13 +73,13 @@ in
     settings = {
       issuer = "http://${oidcAddr}/dex";
       storage = { type = "postgres"; config.host = "/var/run/postgresql"; };
-      # 0.0.0.0: QEMU SLIRP forwards arrive on the guest eth0 address, not
-      # 127.0.0.1. Still host-loopback-only (reached via host port forwards).
+      # 0.0.0.0: reached from other guests via the guest NIC address, not
+      # 127.0.0.1.
       web.http = "0.0.0.0:8080";
       oauth2.skipApprovalScreen = true;
       staticClients = [{
         id = "lasuite-docs";
-        name = "Docs";
+        name = "Selfhostix";
         redirectURIs = [ "http://${domain}/api/v1.0/callback/" ];
         secretFile = "/etc/dex/lasuite-docs";
       }];
@@ -113,7 +103,7 @@ in
       replication_factor = 1;
       s3_api = {
         s3_region = "garage";
-        # 0.0.0.0 for the same SLIRP reason as dex above.
+        # 0.0.0.0 for the same reason as dex above.
         api_bind_addr = "0.0.0.0:9000";
       };
     };

@@ -1,2 +1,9 @@
-vm-disk.qcow2
-vm-loader
+# Collaboration demo (./demo.sh) runtime state + local hosting files
+data/
+*-loader
+result*
+*.img
+*.qcow2
+*.sock
+*.sock.lock
+caddy/  # Caddy runtime storage (host/Caddyfile is the tracked config)

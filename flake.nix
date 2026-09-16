@@ -1,46 +1,22 @@
 {
-  description = "Isolated LaSuite Docs quickstart VM (loopback) — reusable for libvirt testing VM";
+  description = "Selfhostix collaboration server (LaSuite Docs) + Bureautix clients";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    microvm.url = "github:microvm-nix/microvm.nix";
+    microvm.inputs.nixpkgs.follows = "nixpkgs";
   };
 
-  outputs = { self, nixpkgs, ... }: {
+  outputs = { self, nixpkgs, microvm, ... }: {
     nixosConfigurations = {
-      # Isolated temp run: nix build .#nixosConfigurations.quickstart.config.system.build.vm
-      quickstart = nixpkgs.lib.nixosSystem {
+      # Selfhostix server (see ./microvm/docs-guest.nix): full Docs stack as a
+      # cloud-hypervisor microVM for Debian hosts (no libvirt, no qcow2
+      # overlay chain). Run after creating the tap net
+      # (see ./host/net-setup.sh) and starting the proxy:
+      #   nix run .#nixosConfigurations.selfhostix.config.microvm.runner.cloud-hypervisor
+      selfhostix = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
-        modules = [ ./docs-vm.nix {
-          # Runner sizing + SLIRP forwards. NOTE: build.vm reads vmVariant,
-          # build.vmWithBootLoader reads vmVariantWithBootLoader ONLY, so
-          # both must be set (they are independent deltas in this nixpkgs).
-          virtualisation.vmVariant.virtualisation = {
-            memorySize = 4096;
-            cores = 4;
-            diskSize = 8192;
-            forwardPorts = [
-              { from = "host"; host.port = 8081; guest.port = 80; }
-              { from = "host"; host.port = 2221; guest.port = 22; }
-            ];
-          };
-          virtualisation.vmVariantWithBootLoader.virtualisation = {
-            memorySize = 4096;
-            cores = 4;
-            diskSize = 8192;
-            forwardPorts = [
-              { from = "host"; host.port = 8081; guest.port = 80; }
-              { from = "host"; host.port = 8082; guest.port = 8080; }
-              { from = "host"; host.port = 8083; guest.port = 9000; }
-              { from = "host"; host.port = 2221; guest.port = 22; }
-            ];
-          };
-        } ];
-      };
-      # Testing libvirt VM: same base, plus ssh key + hostname tweaks.
-      # Deploy with nixos-anywhere or import qcow2 into virt-manager.
-      testing = nixpkgs.lib.nixosSystem {
-        system = "x86_64-linux";
-        modules = [ ./docs-vm.nix ./testing-vm.nix ];
+        modules = [ microvm.nixosModules.microvm ./microvm/docs-guest.nix ];
       };
     };
   };
