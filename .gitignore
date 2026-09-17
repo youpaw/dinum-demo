@@ -1,4 +1,4 @@
-# Collaboration demo (./demo.sh) runtime state + local hosting files
+# Demo runtime state + local hosting files
 data/
 *-loader
 result*
@@ -6,4 +6,4 @@ result*
 *.qcow2
 *.sock
 *.sock.lock
-caddy/  # Caddy runtime storage (host/Caddyfile is the tracked config)
+caddy/  # Caddy runtime storage (the Caddyfile is generated, see nix/apps.nix)
