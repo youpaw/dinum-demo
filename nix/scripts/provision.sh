@@ -9,16 +9,16 @@ set -euo pipefail
 cd "${DEMO_ROOT:-$PWD}"
 
 provision_one() { # $1=client-index $2=seed-url $3=host-ip
-  local idx="$1" seed_url="$2" host_ip="$3" domain port
+  local idx="$1" seed_url="$2" host_ip="$3" port
   ensure_client_access "$idx"
   port="$(client_ssh_port "$idx")"
   msg "provisioning client c$idx (root@localhost:$port, seed: $seed_url)"
 
-  # Every demo name resolves to the proxy, which holds the certificate for it.
-  for domain in $DEMO_DOMAINS; do
-    ssh_client root localhost "$port" \
-      "grep -q ' $domain\$' /etc/hosts || echo '$host_ip $domain' >> /etc/hosts"
-  done
+  # Every demo name resolves to the proxy, which holds the certificate for
+  # them all — one line, rewritten in place so a changed host IP is corrected
+  # rather than appended to.
+  ssh_client root localhost "$port" \
+    "sed -i '/# selfhostix-demo\$/d' /etc/hosts && echo '$host_ip $DEMO_DOMAINS # selfhostix-demo' >> /etc/hosts"
 
   # Firefox keeps its own trust store, so the CA goes in by policy rather than
   # into the system bundle (which is read-only on a NixOS client anyway).

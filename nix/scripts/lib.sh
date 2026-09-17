@@ -33,7 +33,6 @@ SEED_DOC_TITLE="${SEED_DOC_TITLE:-Demo — live collaboration}"
 # the clients get it installed, so every demo hop validates the real chain.
 CA_FILE="${CA_FILE:-$DATA_DIR/certs/ca.crt}"
 GUEST_ROOT_PASS="${GUEST_ROOT_PASS:-root}"      # demo guest (see nix/guest.nix)
-CLIENT_ROOT_PASS="${CLIENT_ROOT_PASS:-nixos}"   # bureautix-example default
 
 msg() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
@@ -87,10 +86,14 @@ ensure_guest_access() { # [$1=ssh-target] — key auth to the guest, installing 
 }
 
 ensure_client_access() { # $1=client-index — key auth to a booted client
+  # No password fallback here, unlike the guest: securix sets
+  # `PermitRootLogin prohibit-password`, so the key is baked into the image at
+  # build time instead (see nix/client.nix). A client built before that, or
+  # built without --impure, has no key and must be rebuilt.
   ensure_demo_key
   local port; port="$(client_ssh_port "$1")"
-  key_works root localhost "$port" || install_demo_key root localhost "$port" "$CLIENT_ROOT_PASS"
-  key_works root localhost "$port" || die "key auth still failing for client c$1 (localhost:$port; is it booted?)"
+  key_works root localhost "$port" \
+    || die "no key auth for client c$1 (localhost:$port) — booted? built by \`nix run .#clients\`?"
 }
 
 # --- remote execution --------------------------------------------------------
