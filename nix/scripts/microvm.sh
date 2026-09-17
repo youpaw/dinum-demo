@@ -2,24 +2,20 @@ set -euo pipefail
 # Boot/eval the demo guest — one microVM for every service (Debian-native, no
 # libvirt).
 #   nix run .#microvm -- [run|eval]
-# The tap must exist first: sudo nix run .#net-setup
 #
-# Browsers reach the services through the host proxy under the host LAN IP (no
-# /etc/hosts edits needed), so export that origin for Django's CSRF/allowed
-# hosts (see SELFHOSTIX_PUBLIC_ORIGIN in nix/guest.nix). --impure is required
-# for the guest to read it; without it evaluation falls back to the service
-# domains and the guest IP only.
+# Prerequisites, both one-time per host:
+#   sudo nix run .#net-setup      the tap the guest attaches to
+#   sudo nix run .#host-install   the proxy, and the CA the guest must trust
+#
+# The CA cannot be pinned in the flake (it is generated per install and holds a
+# private key), so it is read impurely at build time: the guest needs it to
+# reach the OIDC issuer through the proxy the way a browser does.
 cd "${DEMO_ROOT:-$PWD}"
 
-if [ -z "${SELFHOSTIX_PUBLIC_ORIGIN:-}" ] && command -v detect-origin >/dev/null 2>&1; then
-  SELFHOSTIX_PUBLIC_ORIGIN="$(detect-origin || true)"
-fi
-if [ -n "${SELFHOSTIX_PUBLIC_ORIGIN:-}" ]; then
-  export SELFHOSTIX_PUBLIC_ORIGIN
-  msg "trusting browser origin $SELFHOSTIX_PUBLIC_ORIGIN"
-else
-  warn "host LAN origin undetectable — Django trusts the service domains/guest IP only"
-fi
+[ -f "$CA_FILE" ] || die "demo CA missing: $CA_FILE (run: sudo nix run .#host-install)"
+SELFHOSTIX_CA_FILE="$(readlink -f "$CA_FILE")"
+export SELFHOSTIX_CA_FILE
+msg "guest will trust $SELFHOSTIX_CA_FILE"
 
 nix_flake() { nix --extra-experimental-features 'nix-command flakes' "$@"; }
 config=".#nixosConfigurations.$GUEST_HOST.config"

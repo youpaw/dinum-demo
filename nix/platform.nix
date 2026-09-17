@@ -18,11 +18,12 @@ in {
   options.demo.oidc = {
     issuer = lib.mkOption {
       type = lib.types.str;
-      default = "http://${config.demo.net.ip}:8080/dex";
       description = ''
-        OIDC issuer URL. Must be reachable from clients AND from the backends
-        themselves, and identical for both: hence the guest tap address rather
-        than 127.0.0.1 (dex binds 0.0.0.0:8080 below).
+        OIDC issuer URL, set by ../guest.nix to dex's public name. It must be
+        reachable from browsers AND from the backends themselves, and be the
+        same string for both — so it names the host proxy, not 127.0.0.1 and
+        not the guest IP:port (which only the tap link could reach, the reason
+        this demo used password login before).
       '';
     };
     clients = lib.mkOption {
@@ -80,7 +81,8 @@ in {
           type = "postgres";
           config.host = "/var/run/postgresql";
         };
-        # 0.0.0.0: reached from browsers via the guest NIC address, not 127.0.0.1.
+        # 0.0.0.0: the host proxy dials this over the tap link and serves it
+        # to browsers under `issuer` above.
         web.http = "0.0.0.0:8080";
         oauth2.skipApprovalScreen = true;
         staticClients =
@@ -121,8 +123,10 @@ in {
         replication_factor = 1;
         s3_api = {
           s3_region = "garage";
-          # 0.0.0.0 for the same reason as dex above.
-          api_bind_addr = "0.0.0.0:9000";
+          # Loopback only: each app's nginx proxies /media/ to S3 itself,
+          # signing the request via auth_request, so no client ever addresses
+          # garage directly and nothing outside the guest needs to reach it.
+          api_bind_addr = "127.0.0.1:9000";
         };
       };
     };

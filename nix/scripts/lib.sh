@@ -21,7 +21,6 @@ services_arg() { # $1=requested service name or empty -> validated target list
 
 # --- env defaults (all optional) ---------------------------------------------
 NUM_CLIENTS="${NUM_CLIENTS:-2}"
-SELFHOSTIX_IP="${SELFHOSTIX_IP:-$GUEST_IP}"
 SELFHOSTIX_SSH_TARGET="${SELFHOSTIX_SSH_TARGET:-$GUEST_IP}"
 CLIENT_SSH_BASE="${CLIENT_SSH_BASE:-2221}"
 DEMO_ROOT="${DEMO_ROOT:-$PWD}"
@@ -30,6 +29,9 @@ KEY_DIR="${KEY_DIR:-$DATA_DIR/demo-ssh}"
 USERS_FILE="${USERS_FILE:-$DATA_DIR/users.env}"
 SEED_ENV="${SEED_ENV:-$DATA_DIR/seed.env}"
 SEED_DOC_TITLE="${SEED_DOC_TITLE:-Demo — live collaboration}"
+# CA issued by `sudo nix run .#host-install`; the guest is built against it and
+# the clients get it installed, so every demo hop validates the real chain.
+CA_FILE="${CA_FILE:-$DATA_DIR/certs/ca.crt}"
 GUEST_ROOT_PASS="${GUEST_ROOT_PASS:-root}"      # demo guest (see nix/guest.nix)
 CLIENT_ROOT_PASS="${CLIENT_ROOT_PASS:-nixos}"   # bureautix-example default
 
@@ -37,9 +39,16 @@ msg() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31mXX\033[0m %s\n' "$*" >&2; exit 1; }
 
-# Guest rebuilds regenerate host keys; pinning them would brick every SSH
-# helper on rebuild, so all demo SSH ignores known_hosts.
-SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+# Every demo SSH hop uses these, and nothing else:
+#   -F /dev/null      ignore the host's ssh_config and the user's ~/.ssh/config.
+#                     The demo only ever talks to a link-local guest and to
+#                     localhost hostfwd ports, so inherited ProxyJump/alias
+#                     rules can only surprise it — and a Debian host's
+#                     GSSAPIAuthentication line makes Nix's openssh (built
+#                     without GSSAPI) print "Unsupported option" on every call.
+#   known_hosts off   guest rebuilds regenerate host keys; pinning them would
+#                     brick every helper on rebuild.
+SSH_OPTS=(-F /dev/null -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
 
 client_name() { echo "selfhostix-c$1"; }
 client_ssh_port() { echo "$((CLIENT_SSH_BASE + $1 - 1))"; } # c1 -> 2221, c2 -> 2222
@@ -59,14 +68,14 @@ ensure_demo_key() {
 }
 
 key_works() { # $1=user $2=host $3=port — BatchMode probe, no side effects
-  ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  ssh "${SSH_OPTS[@]}" -o BatchMode=yes \
     -o ConnectTimeout=5 -p "$3" -i "$KEY_DIR/demo" "$1@$2" true 2>/dev/null
 }
 
 install_demo_key() { # $1=user $2=host $3=port $4=password — one-time password auth
   msg "installing demo SSH key on $1@$2 (one-time password auth)"
   local keydata; keydata="$(cat "$KEY_DIR/demo.pub")"
-  sshpass -p"$4" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p "$3" "$1@$2" \
+  sshpass -p"$4" ssh "${SSH_OPTS[@]}" -p "$3" "$1@$2" \
     "mkdir -p ~/.ssh && chmod 700 ~/.ssh && grep -qF '$keydata' ~/.ssh/authorized_keys 2>/dev/null || echo '$keydata' >> ~/.ssh/authorized_keys"
 }
 
@@ -137,13 +146,19 @@ start_client() { # $1=name $2=runner $3=disk $4=ssh-port
 
 # --- users / seed shared helpers ---------------------------------------------
 
-detect_origin() { # host LAN origin for seed links, e.g. http://<host-LAN-IP>
-  if [ -n "${SELFHOSTIX_URL:-}" ]; then printf '%s' "$SELFHOSTIX_URL"; return 0; fi
-  if command -v detect-origin >/dev/null 2>&1; then
-    local origin; origin="$(detect-origin || true)"
-    [ -n "$origin" ] && { printf '%s/' "$origin"; return 0; }
-  fi
-  printf 'http://%s/' "$(service_domain docs)"
+host_lan_ip() { # address clients must resolve the demo names to (the proxy)
+  if [ -n "${SELFHOSTIX_HOST_IP:-}" ]; then printf '%s' "$SELFHOSTIX_HOST_IP"; return 0; fi
+  local addr; addr="$(detect-origin || true)"
+  [ -n "$addr" ] || die "could not detect the host LAN address (set SELFHOSTIX_HOST_IP)"
+  printf '%s' "$addr"
+}
+
+# curl against a demo name, pinned to the proxy on this host and validated
+# against the demo CA — the same chain a browser walks, minus the DNS.
+curl_site() { # $1=domain [curl args...]
+  local domain="$1"; shift
+  [ -f "$CA_FILE" ] || die "demo CA missing: $CA_FILE (run: sudo nix run .#host-install)"
+  curl -s --resolve "$domain:443:127.0.0.1" --cacert "$CA_FILE" "$@"
 }
 
 load_users() {

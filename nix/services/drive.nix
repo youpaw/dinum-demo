@@ -1,8 +1,9 @@
 # LaSuite Drive on the shared guest — mirrors ./docs.nix.
 #
-# Reached at `/drive/*` through the host proxy, which rewrites Host to this
-# vhost's domain; inside the guest it is an ordinary name-based nginx vhost
-# next to Docs, sharing the platform's dex/garage/postgres (../platform.nix).
+# Served under its own name, so its frontend owns /api/v1.0/... at the origin
+# root the way it expects; inside the guest it is an ordinary name-based nginx
+# vhost next to Docs, sharing the platform's dex/garage/postgres
+# (../platform.nix).
 {
   config,
   pkgs,
@@ -25,7 +26,9 @@ in {
     demo.oidc.clients.lasuite-drive = {
       name = "Drive";
       secret = "lasuitedriveclientsecret";
-      redirectURIs = map (o: "${o}/api/v1.0/callback/") net.origins;
+      # Only this app's own callback: every extra entry is somewhere dex
+      # would be willing to send a code to.
+      redirectURIs = ["https://${cfg.domain}/api/v1.0/callback/"];
     };
 
     demo.s3.buckets.${bucket} = {
@@ -41,6 +44,15 @@ in {
       domain = cfg.domain;
       # Trailing slash: nginx proxy_pass to the media bucket needs it.
       s3Url = "${s3.endpoint}/${bucket}/";
+      # Works around a bug in nixpkgs' lasuite-drive-manage wrapper: it
+      # interpolates this list onto its own line inside a `\`-continued
+      # systemd-run command, so an empty list leaves a whitespace-only line
+      # that ends the command early — every `lasuite-drive-manage <cmd>` then
+      # dies with "Command line to execute required." (lasuite-docs has no
+      # such interpolation, which is why only Drive breaks, and why user
+      # propagation reached Docs but not Drive). One file, even an empty one,
+      # keeps the continuation intact; harmless once upstream is fixed.
+      environmentFiles = [(pkgs.writeText "lasuite-drive-extra.env" "")];
       settings = {
         DJANGO_SECRET_KEY_FILE = pkgs.writeText "django-secret-file" ''
           1c7f2a4e9b6d0834517ecfa2b9046d7c1a8e5f30964b2d7ea1c50f836b924d7f
@@ -57,18 +69,18 @@ in {
         OIDC_RP_SIGN_ALGO = "RS256";
         OIDC_RP_SCOPES = "openid email";
         OIDC_RP_CLIENT_SECRET = config.demo.oidc.clients.lasuite-drive.secret;
-        LOGIN_REDIRECT_URL = "http://${cfg.domain}";
-        LOGIN_REDIRECT_URL_FAILURE = "http://${cfg.domain}";
-        LOGOUT_REDIRECT_URL = "http://${cfg.domain}";
+        LOGIN_REDIRECT_URL = "https://${cfg.domain}";
+        LOGIN_REDIRECT_URL_FAILURE = "https://${cfg.domain}";
+        LOGOUT_REDIRECT_URL = "https://${cfg.domain}";
         AWS_S3_ENDPOINT_URL = s3.endpoint;
         AWS_S3_ACCESS_KEY_ID = s3.buckets.${bucket}.accessKey;
         AWS_S3_SECRET_ACCESS_KEY = s3.buckets.${bucket}.secretKey;
         AWS_STORAGE_BUCKET_NAME = bucket;
-        # HTTP-only (no TLS) — same as Docs.
-        DJANGO_SECURE_PROXY_SSL_HEADER = "";
+        # Same forwarded-header handling as Docs (see ./docs.nix).
+        DJANGO_SECURE_PROXY_SSL_HEADER = "HTTP_X_FORWARDED_PROTO,https";
         DJANGO_SECURE_SSL_REDIRECT = false;
-        DJANGO_CSRF_COOKIE_SECURE = false;
-        DJANGO_SESSION_COOKIE_SECURE = false;
+        DJANGO_CSRF_COOKIE_SECURE = true;
+        DJANGO_SESSION_COOKIE_SECURE = true;
       };
     };
 

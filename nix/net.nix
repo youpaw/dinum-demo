@@ -1,5 +1,5 @@
-# Guest network options (etalon pattern): static tap address, the hostnames
-# the guest answers to, and the browser origins it must trust.
+# Guest network options (etalon pattern): static tap address, the names the
+# guest knows, and the origins its apps must trust.
 #
 # nix/guest.nix sets these from nix/services.nix; the service modules read the
 # derived `hosts`/`origins` lists instead of each re-deriving them. No service
@@ -10,11 +10,6 @@
   ...
 }: let
   cfg = config.demo.net;
-  # Host part of an http(s):// origin (for ALLOWED_HOSTS).
-  originHost = o: let
-    noScheme = lib.removePrefix "http://" (lib.removePrefix "https://" o);
-  in
-    builtins.head (lib.splitString ":" noScheme);
 in {
   options.demo.net = {
     ip = lib.mkOption {
@@ -28,7 +23,7 @@ in {
     gateway = lib.mkOption {
       type = lib.types.str;
       default = "192.168.100.1";
-      description = "Next hop (host tap endpoint).";
+      description = "Next hop (host tap endpoint), which is also where the proxy listens.";
     };
     dns = lib.mkOption {
       type = lib.types.str;
@@ -37,35 +32,40 @@ in {
     };
     domains = lib.mkOption {
       type = lib.types.listOf lib.types.str;
-      description = "Public hostnames of the services in this guest (one vhost each).";
+      description = "Every name the host proxy terminates for this guest.";
     };
-    publicOrigins = lib.mkOption {
-      type = lib.types.listOf lib.types.str;
-      default = [];
-      description = "Extra browser origins (e.g. the host LAN origin) trusted by the apps.";
+    proxy = lib.mkOption {
+      type = lib.types.str;
+      default = cfg.gateway;
+      description = ''
+        Address the guest itself resolves `domains` to. The host proxy, not
+        the guest: a backend calling the OIDC issuer must take the same route
+        and see the same certificate a browser does, so the guest's view of
+        these names matches the outside world's.
+      '';
     };
 
     hosts = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       readOnly = true;
-      default = lib.unique (["localhost" "127.0.0.1" cfg.ip] ++ cfg.domains ++ map originHost cfg.publicOrigins);
+      default = lib.unique (["localhost" "127.0.0.1" cfg.ip] ++ cfg.domains);
       description = ''
-        Every `Host` header browsers and the proxy send, for Django's
-        ALLOWED_HOSTS. Without the guest IP and the LAN host, Django answers
-        400 DisallowedHost on all bare-IP / proxied /api and /admin requests
-        (nginx serves the frontend statically, so `/` loads fine while login
-        breaks — the signature symptom).
+        Every `Host` header the apps may see, for Django's ALLOWED_HOSTS.
+        Without them Django answers 400 DisallowedHost on /api and /admin
+        while `/` still loads (nginx serves the frontend statically, so a
+        working homepage with broken login is the signature symptom).
       '';
     };
     origins = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       readOnly = true;
-      default = lib.unique (map (h: "http://${h}") cfg.hosts ++ cfg.publicOrigins);
+      default = map (d: "https://${d}") cfg.domains;
       description = ''
         Every browser origin, for Django's CSRF_TRUSTED_ORIGINS. Django >= 5.2
         checks Origin on ALL unsafe requests (browsers always send it, curl
         doesn't — which is why curl worked and browsers 403'd); a bare
-        "http://*" never matches, so origins must be listed explicitly.
+        "https://*" never matches, so origins must be listed explicitly.
+        HTTPS only: the proxy redirects plain HTTP to it.
       '';
     };
   };
@@ -89,6 +89,6 @@ in {
     };
     networking.useDHCP = lib.mkForce false;
 
-    networking.hosts."${cfg.ip}" = cfg.domains;
+    networking.hosts."${cfg.proxy}" = cfg.domains;
   };
 }

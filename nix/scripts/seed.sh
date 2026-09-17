@@ -7,40 +7,39 @@ owner="${OWNER:-$(nth_email 1)}"
 share_with="${SHARE_WITH:-$(nth_email 2)}"
 owner_pass_val="${OWNER_PASS:-$(owner_pass "$owner")}"
 [ -n "$owner_pass_val" ] || die "owner password unknown for $owner: fix $USERS_FILE or set OWNER_PASS"
-base_url="$(detect_origin)"
 docs_domain="$(service_domain docs)"
 docs_manage="$(service_manage docs)"
 
 msg "checking managed users exist (users check docs)"
 users_check docs
 
-# Talk to Django under its own hostname (Host: docs.selfhostix resolved to the
-# guest IP): the guest serves every service as a name-based vhost, and Django
-# 400s on Host headers outside ALLOWED_HOSTS (see nix/net.nix).
-guest="http://$docs_domain"
-resolve="$docs_domain:80:$SELFHOSTIX_SSH_TARGET"
+# Go through the proxy under the real name, over TLS: session and CSRF cookies
+# are Secure now, so a plain-HTTP shortcut to the guest would have its cookies
+# dropped by curl and never get past the admin login.
+base_url="${SELFHOSTIX_URL:-https://$docs_domain/}"
+guest="https://$docs_domain"
 
-msg "waiting for the Docs API on $guest ($SELFHOSTIX_SSH_TARGET)"
+msg "waiting for the Docs API on $guest"
 code=""
 for _ in $(seq 1 60); do
-  code="$(curl -ks --resolve "$resolve" -o /dev/null -w '%{http_code}' --max-time 5 "$guest/")"
+  code="$(curl_site "$docs_domain" -o /dev/null -w '%{http_code}' --max-time 5 "$guest/")"
   [ "$code" = "200" ] && break
   sleep 5
 done
-[ "$code" = "200" ] || die "API not ready on $guest/ (start the guest first: nix run .#microvm)"
+[ "$code" = "200" ] || die "API not ready on $guest/ (guest booted? proxy installed?)"
 
 msg "logging in as $owner and creating seed document"
 jar="$(mktemp -d)/cookies.txt"
-csrf_mid="$(curl -ks --resolve "$resolve" -c "$jar" "$guest/admin/login/" | grep -o 'csrfmiddlewaretoken" value="[^"]*' | cut -d'"' -f3)"
+csrf_mid="$(curl_site "$docs_domain" -c "$jar" "$guest/admin/login/" | grep -o 'csrfmiddlewaretoken" value="[^"]*' | cut -d'"' -f3)"
 [ -n "${csrf_mid:-}" ] || die "no CSRF token at $guest/admin/login/ (is Django up?)"
-curl -ks --resolve "$resolve" -b "$jar" -c "$jar" -e "$guest/admin/login/" \
+curl_site "$docs_domain" -b "$jar" -c "$jar" -e "$guest/admin/login/" \
   -d "csrfmiddlewaretoken=$csrf_mid&username=$owner&password=$owner_pass_val" \
   "$guest/admin/login/" -o /dev/null
 csrft="$(grep csrftoken "$jar" | awk '{print $NF}')"
 sess="$(grep sessionid "$jar" | awk '{print $NF}')"
 [ -n "${sess:-}" ] || die "admin login failed for $owner (no sessionid cookie)"
 
-doc_json="$(curl -ks --resolve "$resolve" -b "$jar" -H "X-CSRFToken: $csrft" -H "Referer: $guest/" \
+doc_json="$(curl_site "$docs_domain" -b "$jar" -H "X-CSRFToken: $csrft" -H "Referer: $guest/" \
   -H "Content-Type: application/json" \
   -d "{\"title\": \"$SEED_DOC_TITLE\"}" "$guest/api/v1.0/documents/")"
 doc_id="$(printf '%s' "$doc_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))')"
@@ -63,7 +62,7 @@ PYEOF
   if [ -n "$share_id" ]; then
     # NOTE: the write field is `user_id` (not `user`); `team` is a string
     # that must be "" for user accesses (DB check constraint).
-    curl -ks --resolve "$resolve" -b "$jar" -H "X-CSRFToken: $csrft" -H "Referer: $guest/" \
+    curl_site "$docs_domain" -b "$jar" -H "X-CSRFToken: $csrft" -H "Referer: $guest/" \
       -H "Content-Type: application/json" \
       -d "{\"user_id\": \"$share_id\", \"team\": \"\", \"role\": \"editor\"}" \
       "$guest/api/v1.0/documents/$doc_id/accesses/" -o /dev/null -w "share with $share_with -> %{http_code}\n" || true

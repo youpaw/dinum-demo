@@ -6,9 +6,9 @@
 #
 # One guest means one wire: `sudo nix run .#net-setup` puts the gateway
 # address on the tap itself, so there is no bridge to join taps behind. The
-# host reverse proxy (generated from ../nix/services.nix, see nix/apps.nix)
-# binds the LAN IP and forwards to :80 here, so only the proxy is LAN-visible;
-# dex (:8080) and garage (:9000) stay on the tap link unless proxied.
+# host reverse proxy (generated from ./services.nix, see nix/apps.nix)
+# terminates TLS for every name and forwards plain HTTP over the tap, so only
+# the proxy is LAN-visible; garage never leaves the guest at all.
 #
 # This file is the only place demo data (../nix/services.nix) meets the
 # option tree; everything below it is parametrised through `demo.*` options.
@@ -19,11 +19,12 @@
 }: let
   demo = import ./services.nix {inherit lib;};
   inherit (demo) guest services;
-  # The origin browsers actually use (the host's LAN address) cannot be known
-  # at flake pin time. Boot wrappers export SELFHOSTIX_PUBLIC_ORIGIN (see
-  # nix/scripts/microvm.sh); without --impure getEnv reads "" and this is a
-  # no-op, so pure evaluation is unaffected.
-  envOrigin = builtins.getEnv "SELFHOSTIX_PUBLIC_ORIGIN";
+  # The demo CA is generated per install (`sudo nix run .#host-install`), so
+  # it cannot be pinned in the flake. The boot wrapper exports its path (see
+  # nix/scripts/microvm.sh, which refuses to boot without it); without
+  # --impure getEnv reads "" and the guest simply trusts nothing extra, so
+  # pure evaluation still works.
+  caFile = builtins.getEnv "SELFHOSTIX_CA_FILE";
 in {
   imports = [
     ./net.nix
@@ -34,11 +35,20 @@ in {
 
   demo.net = {
     inherit (guest) ip mac gateway dns;
-    domains = lib.mapAttrsToList (_: s: s.domain) services;
-    publicOrigins = lib.optional (envOrigin != "") envOrigin;
+    inherit (demo) domains;
   };
+
   demo.docs.domain = services.docs.domain;
   demo.drive.domain = services.drive.domain;
+  # dex answers under this name through the proxy; browsers and the backends
+  # therefore see one issuer URL, with one certificate.
+  demo.oidc.issuer = "https://${demo.infra.auth.domain}/dex";
+
+  # Trust the demo CA, so a backend reaching the issuer takes the same route
+  # and validates the same certificate a browser does.
+  security.pki.certificateFiles =
+    lib.optional (caFile != "")
+    (pkgs.writeText "selfhostix-demo-ca.crt" (builtins.readFile caFile));
 
   microvm = {
     hypervisor = "cloud-hypervisor";
@@ -78,10 +88,10 @@ in {
   services.getty.autologinUser = lib.mkDefault "root";
   services.openssh.enable = true;
   services.openssh.settings.PermitRootLogin = "yes";
-  # 80/443 nginx; 8080 dex and 9000 garage-S3 are reached via the guest tap
-  # address, so the firewall must allow them even though nothing listens on
-  # public sockets.
-  networking.firewall.allowedTCPPorts = [80 443 8080 9000];
+  # Only what the host proxy dials over the tap: nginx (both app vhosts) and
+  # dex. Garage binds loopback and is reached by nginx alone (../platform.nix),
+  # and TLS is terminated on the host, so 443 and 9000 stay shut.
+  networking.firewall.allowedTCPPorts = [80 8080];
 
   # Hand tools for poking at the stack from the guest console.
   environment.systemPackages = with pkgs; [curl jq garage_2];
